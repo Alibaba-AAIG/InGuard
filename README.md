@@ -600,7 +600,10 @@ stage can also be run alone (`--stage env|link|tests|verify|pe`).
 
 ## License
 
-This repository is released under the [Apache License 2.0](LICENSE).
+InGuard code and released guardrail weights are provided under the
+[Apache License 2.0](LICENSE). Bundled third-party components retain their
+original terms; see [Third-Party Notices](THIRD_PARTY_NOTICES.md). The RevGen
+dataset is separately released under CC BY-NC 4.0.
 
 ## Citation
 

@@ -8,7 +8,7 @@ ConvNeXt-Base backbone + 3-task MLP heads, trained on latent space of diffusion 
 |-------|----------|----------------|---------------|--------|
 | z-image-turbo | ConvNeXt-Base | 16 | 50k | Latent + distill pretrain + finetune |
 | qwen-image-2512 | ConvNeXt-Base | 16 | 50k | Latent + distill pretrain + finetune |
-| hunyuan-image-2_1 | ConvNeXt-Base | 16 | 50k | Latent + distill pretrain + finetune |
+| hunyuan-image-2_1 | ConvNeXt-Base | 64 | 50k | Latent + distill pretrain + finetune |
 | flux2-klein-base-9b | ConvNeXt-Base | 32 | 50k | Latent + distill pretrain + finetune |
 | internvl-u | ConvNeXt-Base | 16 | 50k | Latent + distill pretrain + finetune |
 
@@ -66,8 +66,9 @@ print(result)
 
 ## Latent Input Format
 
-- **z-image-turbo / hunyuan-image-2_1 / internvl-u**: `[16, H, W]` or `[1, 16, H, W]`
+- **z-image-turbo / internvl-u**: `[16, H, W]` or `[1, 16, H, W]`
 - **qwen-image-2512**: `[16, H, W]` or `[1, 16, 1, H, W]` (5D, squeeze needed)
+- **hunyuan-image-2_1**: `[64, H, W]` or `[1, 64, H, W]`
 - **flux2-klein-base-9b**: unpacked `[32, H, W]` or `[1, 32, H, W]` (patchified → unpacked VAE latent; see `full_unpack_latents` in `sage/sage_enhance.py`)
 
 The detector handles these formats automatically.
@@ -84,7 +85,7 @@ torchvision
 ```
 ├── model.py              # Model architecture (self-contained)
 ├── inference.py           # Loading & inference API
-├── z-image-turbo/         # best_test_avg_f1_model.pth + config.json
+├── z-image-turbo/         # model.pth + config.json
 ├── qwen-image-2512/
 ├── hunyuan-image-2_1/
 ├── flux2-klein-base-9b/
