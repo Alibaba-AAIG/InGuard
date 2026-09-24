@@ -1,0 +1,26 @@
+{
+  "pipeline_class": "QwenImagePipeline",
+  "adapter": "QwenImageAdapter",
+  "num_steps": 10,
+  "detect_step": 4,
+  "width": 1328,
+  "height": 1328,
+  "guidance_key": "true_cfg_scale",
+  "guidance_value": 4.0,
+  "tau_p": 5,
+  "tau_g": 2,
+  "alpha_p": -0.03,
+  "alpha_g": 0.01,
+  "alpha_i": -0.05,
+  "tau_toxic": 0.005,
+  "tau_safe": 0.02,
+  "borderline_porn": 3,
+  "borderline_gore": 2,
+  "borderline_ip": [
+    1,
+    5
+  ],
+  "fallback": true,
+  "model_name": "qwen-image-2512",
+  "ip_mode": "sage"
+}

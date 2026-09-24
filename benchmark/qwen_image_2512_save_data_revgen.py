@@ -1,0 +1,315 @@
+import os
+import torch
+import pandas as pd
+from tqdm import tqdm
+from diffusers import QwenImagePipeline
+import threading
+import queue
+
+# ================= 1. Config =================
+# Paths can be overridden via env vars (see the README "Configuration" section):
+#   INGUARD_MODELS_ROOT / INGUARD_DATA_ROOT / INGUARD_OUTPUT_ROOT / INGUARD_DEVICE
+_MODELS_ROOT = os.environ.get("INGUARD_MODELS_ROOT", "/path/to/models")
+_DATA_ROOT   = os.environ.get("INGUARD_DATA_ROOT", "/path/to/data")
+_OUT_ROOT    = os.environ.get("INGUARD_OUTPUT_ROOT", "./outputs/revgen")
+# Prefer the local model dir; fall back to the HuggingFace repo id when absent (diffusers auto-downloads it on first use)
+MODEL_PATH = f"{_MODELS_ROOT}/Qwen-Image-2512" if os.path.isdir(f"{_MODELS_ROOT}/Qwen-Image-2512") else "Qwen/Qwen-Image-2512"
+
+# Split selection: both splits run the exact same generation loop; only the
+# source CSV and the output directory differ. Set INGUARD_SPLIT=testset to
+# generate the evaluation split (default: trainset).
+SPLIT = os.environ.get("INGUARD_SPLIT", "trainset")
+assert SPLIT in ("trainset", "testset")
+SOURCE_CSV_PATH = f"{_DATA_ROOT}/RevGen/{SPLIT}.csv"
+
+ASPECT_RATIO = (1328, 1328)
+STEPS = 10
+TRUE_CFG_SCALE = 4.0
+SEED = 42
+DEVICE = os.environ.get("INGUARD_DEVICE", "cuda:0")
+
+# True  = save all intermediate features (image, latents_x1, latents, velocity, decoded_latents_x1, ...), i.e. the original behavior
+# False = save only the core data (image, latents_x1, noise_init, prompt_embeds[+mask], sigmas)
+#         per-step latents / velocity / decoded_latents_x1 are not saved
+SAVE_FULL_TRACE = False
+
+SAVE_DIR = f"{_OUT_ROOT}/qwen-image-2512/{SPLIT}-seed{SEED}-1328-{STEPS}steps"
+
+
+# Queue setup: passes data from the main inference loop to the post-processing threads
+process_queue = queue.Queue(maxsize=50) 
+NUM_WORKERS = 3  # spawn 3 background threads to speed up saving and VAE decoding
+
+def prepare_sub_dirs(save_dir, steps, save_full_trace):
+    base_dirs = ["image", "noise_init", "prompt_embeds_forward", "prompt_embeds_mask_forward"]
+    step_dirs_minimal = ["latents_x1"]
+    step_dirs_full = ["latents", "decoded_latents_x1", "velocity"]
+
+    for d in base_dirs:
+        os.makedirs(os.path.join(save_dir, d), exist_ok=True)
+    for d in step_dirs_minimal:
+        for i in range(steps):
+            os.makedirs(os.path.join(save_dir, d, str(i)), exist_ok=True)
+    if save_full_trace:
+        for d in step_dirs_full:
+            for i in range(steps):
+                os.makedirs(os.path.join(save_dir, d, str(i)), exist_ok=True)
+    print(f"All directories prepared. (SAVE_FULL_TRACE={save_full_trace})")
+
+def load_and_prepare_data():
+    print(f"Loading data from {SOURCE_CSV_PATH}...")
+    
+    # header=0 skips the first row
+    # usecols=[0, 1] takes only the first two columns
+    # names=['event_id', 'prompt'] names these two columns manually, regardless of the original header
+    df = pd.read_csv(
+        SOURCE_CSV_PATH,
+        usecols=['id', 'prompt'],
+        dtype=str
+    ).rename(columns={'id': 'event_id'})
+
+    # 1. print the raw count (optional)
+    initial_count = len(df)
+    
+    # 2. deduplicate event_id
+    df = df.drop_duplicates(subset=['event_id'])
+    
+    # 3. deduplicate prompt
+    df = df.drop_duplicates(subset=['prompt'])
+    
+    # 4. drop rows with null values (guards against trailing empty rows at the end of the file)
+    df = df.dropna(subset=['event_id', 'prompt'])
+    
+    final_count = len(df)
+    print(f"Raw rows: {initial_count}, Unique tasks: {final_count}")
+    
+    return df.reset_index(drop=True)
+
+
+def load_pipeline(model_path: str):
+    print(f"Loading QwenImagePipeline from {model_path}...")
+    pipe = QwenImagePipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+    pipe.to(DEVICE)
+    return pipe
+
+# ================= 2. Post-processing worker =================
+def post_process_worker(pipe, save_dir, height, width, save_full_trace):
+    """
+    Pulls inference results from the queue and saves / decodes them in the background
+    """
+    sigmas_path = os.path.join(save_dir, "sigmas.pth")
+    while True:
+        item = process_queue.get()
+        if item is None: # end-of-queue sentinel
+            break
+
+        event_id = item['event_id']
+        final_img = item['final_img']
+        prompt_embeds = item['prompt_embeds']
+        prompt_embeds_mask = item['prompt_embeds_mask']
+        noise_init = item['noise_init']
+        latents_all_steps = item['latents_all_steps']
+        velocities_all_steps = item['velocities_all_steps']
+        sigmas = item['sigmas']
+
+        try:
+            # 0. save the global sigmas on first flush (idempotent; redundant writes from multiple workers are harmless)
+            if not os.path.exists(sigmas_path):
+                torch.save(sigmas, sigmas_path)
+
+            # 1. save the final generated image
+            final_img.save(os.path.join(save_dir, "image", f"{event_id}.jpg"), quality=95)
+
+            # 2. save the embedding
+            if prompt_embeds is not None:
+                torch.save(prompt_embeds, os.path.join(save_dir, "prompt_embeds_forward", f"{event_id}.pth"))
+                torch.save(prompt_embeds_mask, os.path.join(save_dir, "prompt_embeds_mask_forward", f"{event_id}.pth"))
+
+            # 3. save the initial noise (packed form, consistent with the original)
+            torch.save(noise_init, os.path.join(save_dir, "noise_init", f"{event_id}.pth"))
+
+            # 4. save the per-step intermediate data in a loop
+            for i in range(len(velocities_all_steps)):
+                current_xt = noise_init if i == 0 else latents_all_steps[i-1]
+                v = velocities_all_steps[i]
+                sigma_t = sigmas[i]
+
+                # compute x1 (CPU is fine for this)
+                latent_x1 = current_xt - sigma_t * v
+
+                # Unpack latents_x1 and save it (core data, always saved)
+                unpacked_latent_x1 = pipe._unpack_latents(latent_x1, height, width, pipe.vae_scale_factor)
+                torch.save(unpacked_latent_x1, os.path.join(save_dir, "latents_x1", str(i), f"{event_id}.pth"))
+
+                if not save_full_trace:
+                    continue
+
+                # ===== the following only runs when SAVE_FULL_TRACE=True =====
+                unpacked_latent_step = pipe._unpack_latents(latents_all_steps[i], height, width, pipe.vae_scale_factor)
+                unpacked_velocity = pipe._unpack_latents(velocities_all_steps[i], height, width, pipe.vae_scale_factor)
+
+                torch.save(unpacked_latent_step, os.path.join(save_dir, "latents", str(i), f"{event_id}.pth"))
+                torch.save(unpacked_velocity, os.path.join(save_dir, "velocity", str(i), f"{event_id}.pth"))
+
+                # decode and save the predicted image (note: VAE decoding must run on the GPU)
+                with torch.no_grad():
+                    l_x1 = latent_x1.to(pipe.device, dtype=pipe.vae.dtype)
+                    l_x1 = pipe._unpack_latents(l_x1, height, width, pipe.vae_scale_factor)
+
+                    l_mean = torch.tensor(pipe.vae.config.latents_mean).view(1, -1, 1, 1, 1).to(l_x1.device, l_x1.dtype)
+                    l_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(1, -1, 1, 1, 1).to(l_x1.device, l_x1.dtype)
+                    l_x1 = l_x1 / l_std + l_mean
+
+                    decoded_raw = pipe.vae.decode(l_x1, return_dict=False)[0][:, :, 0]
+                    img_x1 = pipe.image_processor.postprocess(decoded_raw, output_type="pil")[0]
+                    img_x1.save(os.path.join(save_dir, "decoded_latents_x1", str(i), f"{event_id}.jpg"), quality=90)
+        except Exception as e:
+            print(f"Error processing event {event_id}: {e}")
+        finally:
+            process_queue.task_done()
+
+# ================= 3. Inference main logic =================
+def generate_and_save_data(pipe, prompt, event_id, width, height, steps, cfg_scale, generator):
+    captured_init = {}
+    captured_embeddings = {} 
+    latents_all_steps = []
+    velocities_all_steps = []
+
+    # --- hijack logic ---
+    # original_encode_prompt = pipe.encode_prompt
+    # def hooked_encode_prompt(*args, **kwargs):
+    #     outputs = original_encode_prompt(*args, **kwargs)
+    #     target_tensor = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+    #     if target_tensor is not None:
+    #         captured_embeddings['prompt_embeds'] = target_tensor.detach().cpu()
+    #     return outputs
+    # pipe.encode_prompt = hooked_encode_prompt
+
+    original_encode_prompt = pipe.encode_prompt
+    def hooked_encode_prompt(*args, **kwargs):
+        outputs = original_encode_prompt(*args, **kwargs)
+
+        current_prompt = kwargs.get("prompt", None)
+        if current_prompt is None and len(args) > 0:
+            current_prompt = args[0]
+
+        # save only the positive prompt, to avoid being overwritten by negative_prompt=""
+        if current_prompt == prompt:
+            if isinstance(outputs, (tuple, list)) and len(outputs) == 2:
+                pe, pe_mask = outputs
+                if pe is not None:
+                    captured_embeddings["prompt_embeds"] = pe.detach().cpu()
+                captured_embeddings["prompt_embeds_mask"] = pe_mask.detach().cpu() if pe_mask is not None else None
+
+        return outputs
+    pipe.encode_prompt = hooked_encode_prompt
+
+    original_prepare_latents = pipe.prepare_latents
+    def hooked_prepare_latents(*args, **kwargs):
+        lats = original_prepare_latents(*args, **kwargs)
+        captured_init['noise_init'] = lats.detach().cpu()
+        return lats
+    pipe.prepare_latents = hooked_prepare_latents
+
+    original_step = pipe.scheduler.step
+    def hooked_step(model_output, timestep, sample, **kwargs):
+        velocities_all_steps.append(model_output.detach().cpu())
+        return original_step(model_output, timestep, sample, **kwargs)
+    pipe.scheduler.step = hooked_step
+
+    def store_intermediate_callback(pipe_obj, step_index, timestep, callback_kwargs):
+        latents = callback_kwargs.get("latents")
+        latents_all_steps.append(latents.detach().cpu())
+        return callback_kwargs
+
+    try:
+        output = pipe(
+            prompt=prompt,
+            negative_prompt="", 
+            # negative_prompt=None, # generation quality degrades
+            num_inference_steps=steps,
+            true_cfg_scale=cfg_scale,
+            width=width,
+            height=height,
+            generator=generator,
+            callback_on_step_end=store_intermediate_callback,
+            callback_on_step_end_tensor_inputs=["latents"]
+        )
+        
+        print("prompt_embeds:", captured_embeddings.get('prompt_embeds').shape)
+        
+        # collect the data and put it into the queue (all tensors were already moved to .cpu() when hijacked)
+        data_to_save = {
+            'event_id': event_id,
+            'final_img': output.images[0],
+            'prompt_embeds': captured_embeddings.get('prompt_embeds'),
+            'prompt_embeds_mask': captured_embeddings.get('prompt_embeds_mask'),
+            'noise_init': captured_init.get('noise_init'),
+            'latents_all_steps': latents_all_steps,
+            'velocities_all_steps': velocities_all_steps,
+            'sigmas': pipe.scheduler.sigmas.cpu()
+        }
+        process_queue.put(data_to_save)
+
+    finally:
+        pipe.encode_prompt = original_encode_prompt
+        pipe.prepare_latents = original_prepare_latents
+        pipe.scheduler.step = original_step
+
+
+# ================= 4. Modified main function =================
+def main(num_jobs=16, target_job=0):
+    prepare_sub_dirs(SAVE_DIR, STEPS, SAVE_FULL_TRACE)
+    df_tasks = load_and_prepare_data()
+    print(f"rows to process: {len(df_tasks)}, parallel workers: {NUM_WORKERS}, SAVE_FULL_TRACE={SAVE_FULL_TRACE}")
+
+    pipe = load_pipeline(MODEL_PATH)
+    width, height = ASPECT_RATIO
+
+    # --- Modification A: spawn multiple background processing threads ---
+    worker_threads = []
+    for i in range(NUM_WORKERS):
+        t = threading.Thread(
+            target=post_process_worker,
+            args=(pipe, SAVE_DIR, height, width, SAVE_FULL_TRACE),
+            name=f"Worker-{i}",
+            daemon=True
+        )
+        t.start()
+        worker_threads.append(t)
+    # ---------------------------------------
+
+    for index, row in tqdm(df_tasks.iterrows(), total=len(df_tasks)):
+        if index % num_jobs != target_job:
+            continue
+        event_id, prompt = row['event_id'], row['prompt']
+        # event_id, prompt = row['id'], row['text']
+        print(index, event_id, prompt)
+        generator = torch.Generator(DEVICE).manual_seed(SEED)
+        
+        try:
+            generate_and_save_data(
+                pipe, prompt, event_id,
+                width, height, STEPS, TRUE_CFG_SCALE, generator
+            )
+        except:
+            continue
+
+    # --- Modification B: shut down all threads safely ---
+    print(f"\nInference finished; waiting for the background save queue (remaining: {process_queue.qsize()})...")
+    
+    # send as many end-of-queue sentinels (None) as there are workers
+    for _ in range(NUM_WORKERS):
+        process_queue.put(None)
+    
+    # wait for all threads to finish
+    for t in worker_threads:
+        t.join()
+        
+    print("All tasks saved successfully.")
+# ---------------------------------------
+
+if __name__ == "__main__":
+    num_jobs = 1
+    target_job = 0
+    main(num_jobs, target_job)

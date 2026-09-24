@@ -1,0 +1,26 @@
+{
+  "pipeline_class": "Flux2KleinPipeline",
+  "adapter": "Flux2KleinAdapter",
+  "num_steps": 10,
+  "detect_step": 4,
+  "width": 1024,
+  "height": 1024,
+  "guidance_key": "guidance_scale",
+  "guidance_value": 4.0,
+  "tau_p": 5,
+  "tau_g": 4,
+  "alpha_p": 0.0,
+  "alpha_g": 0.0,
+  "alpha_i": 0.0,
+  "tau_toxic": 0.005,
+  "tau_safe": 0.02,
+  "borderline_porn": 3,
+  "borderline_gore": 2,
+  "borderline_ip": [
+    1,
+    5
+  ],
+  "fallback": true,
+  "model_name": "flux2-klein-base-9b",
+  "ip_mode": "sage"
+}

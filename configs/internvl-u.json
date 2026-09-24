@@ -1,0 +1,27 @@
+{
+  "pipeline_class": "InternVLUPipeline",
+  "adapter": "InternVLUAdapter",
+  "num_steps": 20,
+  "detect_step": 8,
+  "width": 1024,
+  "height": 1024,
+  "guidance_key": "all_cfg_scale",
+  "guidance_value": 4.5,
+  "part_cfg_scale": 2.0,
+  "tau_p": 5,
+  "tau_g": 2,
+  "alpha_p": 0.01,
+  "alpha_g": 0.05,
+  "alpha_i": 0.0,
+  "tau_toxic": 0.005,
+  "tau_safe": 0.02,
+  "borderline_porn": 3,
+  "borderline_gore": 2,
+  "borderline_ip": [
+    1,
+    5
+  ],
+  "fallback": true,
+  "model_name": "internvl-u",
+  "ip_mode": "sage"
+}

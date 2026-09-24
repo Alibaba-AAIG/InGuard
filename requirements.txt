@@ -1,0 +1,18 @@
+# Dependencies for training, data labeling, and the end-to-end guardrail pipeline
+torch>=2.1.0
+torchvision
+# ZImagePipeline / QwenImagePipeline / HunyuanImagePipeline / Flux2KleinPipeline
+# are recent additions; use the latest diffusers release
+diffusers>=0.36.0
+# The InternVL-U backend imports InternVLImagesKwargs and is verified with
+# this exact version; transformers 5.x removed that API.
+transformers==4.52.3
+einops
+timm
+numpy
+pandas
+tqdm
+Pillow
+matplotlib
+# Step-2 VLM labeling (scripts/label_images.py) calls the DashScope API
+dashscope

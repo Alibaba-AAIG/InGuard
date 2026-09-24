@@ -604,15 +604,17 @@ This repository is released under the [Apache License 2.0](LICENSE).
 
 ## Citation
 
-If you use InGuard in your research, please cite the technical report:
+If you use InGuard in your research, please cite our [paper](https://arxiv.org/abs/2609.27620):
 
 ```bibtex
-@techreport{inguard2026,
-  title  = {InGuard: Towards Generalized Inner Guardrail for
-           Safe Text-to-Image Generation},
-  author = {Wang, Zeyu and Li, Xiaodan and Li, Zhiwen and
-            Chen, Yuefeng and Xue, Hui},
-  year   = {2026},
-  note   = {Technical report}
+@article{wang2026inguard,
+  title   = {InGuard: Towards Generalized Inner Guardrail for
+             Safe Text-to-Image Generation},
+  author  = {Wang, Zeyu and Li, Xiaodan and Li, Zhiwen and
+             Chen, Yuefeng and Xue, Hui},
+  journal = {arXiv preprint arXiv:2609.27620},
+  year    = {2026},
+  doi     = {10.48550/arXiv.2609.27620},
+  url     = {https://arxiv.org/abs/2609.27620}
 }
 ```

@@ -1,0 +1,26 @@
+{
+  "pipeline_class": "HunyuanImagePipeline",
+  "adapter": "HunyuanImageAdapter",
+  "num_steps": 10,
+  "detect_step": 4,
+  "width": 2048,
+  "height": 2048,
+  "guidance_key": "distilled_guidance_scale",
+  "guidance_value": 3.25,
+  "tau_p": 5,
+  "tau_g": 4,
+  "alpha_p": 0.06,
+  "alpha_g": 0.06,
+  "alpha_i": 0.03,
+  "tau_toxic": 0.005,
+  "tau_safe": 0.02,
+  "borderline_porn": 3,
+  "borderline_gore": 2,
+  "borderline_ip": [
+    1,
+    5
+  ],
+  "fallback": true,
+  "model_name": "hunyuan-image-2_1",
+  "ip_mode": "sage"
+}
