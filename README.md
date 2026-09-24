@@ -601,9 +601,12 @@ stage can also be run alone (`--stage env|link|tests|verify|pe`).
 ## License
 
 InGuard code and released guardrail weights are provided under the
-[Apache License 2.0](LICENSE). Bundled third-party components retain their
-original terms; see [Third-Party Notices](THIRD_PARTY_NOTICES.md). The RevGen
-dataset is separately released under CC BY-NC 4.0.
+[Apache License 2.0](LICENSE). The bundled InternVL-U backend contains code
+from OpenGVLab, Qwen-Image, Hugging Face, and PixArt-Sigma; those components
+retain their original MIT or Apache-2.0 terms and copyright notices. The
+applicable MIT license is included in
+[`sage/backends/internvlu/LICENSE`](sage/backends/internvlu/LICENSE). The
+RevGen dataset is separately released under CC BY-NC 4.0.
 
 ## Citation
 
