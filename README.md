@@ -1,58 +1,53 @@
 # InGuard: Towards Generalized Inner Guardrail for Safe Text-to-Image Generation
 
-InGuard is an **in-pipeline safety framework** for text-to-image (T2I) diffusion
-models. Instead of wrapping the model with external prompt blockers and
-post-hoc image filters, InGuard enforces safety **inside the generation loop**,
-using only the model's own internal representations:
+InGuard is an **in-pipeline safety framework** for text-to-image (T2I)
+generation. Instead of checking only the prompt before generation or the final
+image afterward, it places lightweight safety components directly inside the
+generation pipeline.
 
-1. **PE-MLP** — a lightweight MLP risk classifier operating directly on the
-   model's text-encoder embeddings, grading each prompt into unsafe / risky /
-   benign levels for three risk dimensions (porn, gore, IP).
-2. **SAGE** (Soft-gated Asymmetric Guardrail for Embeddings) — an
-   embedding-space enhancement module that repairs risky prompts by projecting
-   them away from concept subspaces, aiming to return safe images that
-   preserve the original request instead of rejecting it outright.
-3. **Latent detector** — a ConvNeXt-Base classifier that inspects the latent
-   features produced by the Flow Matching one-step estimate at an intermediate
-   denoising step, so unsafe content is caught **mid-generation** and the
-   remaining steps are skipped.
+![Outer guardrail versus the InGuard inner-guardrail design](./assets/readme/inguard-concept.png)
 
-```
-              prompt
-                │
-        ┌───────▼────────┐
-        │  1. PE-MLP     │  prompt risk classification on text-encoder
-        │  risk levels   │  embeddings (porn / gore / IP, argmax)
-        └───────┬────────┘
-        red ──► block (no generation)
-        ip / borderline ──► 2. SAGE embedding enhancement
-        white ──────────────► (no enhancement)
-                │
-        ┌───────▼────────┐
-        │ 3. Latent      │  one-step estimate x_t − σ_t·v_t computed
-        │    detector    │  inside the denoising loop at detect_step,
-        │                │  fed to a ConvNeXt-Base latent classifier
-        └───────┬────────┘
-        unsafe ──► block (abort remaining steps, save compute)
-        safe   ──► return image + full decision record
-```
+*Outer guardrails screen inputs and completed images; InGuard intervenes within
+the generation process.*
 
-Compared with a conventional outer guardrail (external prompt classifier +
-post-hoc image classifier), InGuard matches or exceeds end-to-end safety
-(97.9–98.8%) while cutting benign disturbance by 57.5–73.5%, using ~3.7× fewer
-parameters and saving up to 55.6% of the denoising compute when content is
-intercepted mid-generation.
+## How InGuard works
+
+1. **PE-MLP** classifies the model's text-encoder embeddings across porn, gore,
+   and controlled-IP risk dimensions, blocking clearly unsafe prompts.
+2. **SAGE** (Soft-gated Asymmetric Guardrail for Embeddings) reduces detected
+   risk in the prompt embedding while preserving the requested content.
+3. **Latent detector** checks a one-step latent estimate during denoising and
+   stops the remaining steps when unsafe content is detected.
+
+![The three-stage InGuard pipeline](./assets/readme/inguard-pipeline.png)
+
+*PE-MLP screening and SAGE enhancement run before generation; latent detection
+provides an in-flight safety fallback.*
+
+## At a glance
+
+- **97.9–98.8% end-to-end safety** across the five supported T2I models.
+- **57.5–73.5% lower benign disturbance** with approximately **3.7× fewer
+  guardrail parameters** than a conventional outer guardrail.
+- **Up to 55.6% of denoising compute saved** when an unsafe generation is
+  intercepted before completion.
+
+![Two possible outcomes for a risky request under InGuard](./assets/readme/inguard-outcomes.png)
+
+*Risky requests can yield a safely enhanced image; if enhancement is
+insufficient, the latent detector blocks the output before generation finishes.*
 
 ## Contents
 
 - [Supported models](#supported-models)
 - [Installation](#installation)
-- [Configuration](#configuration)
 - [Resources](#resources)
   - [RevGen dataset](#revgen-dataset)
   - [Released weights](#released-weights)
 - [Quick start (inference with released weights)](#quick-start-inference-with-released-weights)
+- [Configuration](#configuration)
 - [Routing logic](#routing-logic)
+- [Key results](#key-results)
 - [Training from scratch](#training-from-scratch)
 - [Inference with your own checkpoints](#inference-with-your-own-checkpoints)
 - [Tests](#tests)
@@ -85,54 +80,6 @@ diffusers pipelines above are recent additions). GPU is required for
 generation and recommended for training; the exported guardrail heads also
 run on CPU.
 
-## Configuration
-
-Training, benchmark, and evaluation scripts read their default paths from
-environment variables. Defaults are placeholders (`/path/to/...`) — export
-the ones you need before running anything:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `INGUARD_MODELS_ROOT` | `/path/to/models` | Root of the five T2I generation models |
-| `INGUARD_DATA_ROOT` | `/path/to/data` | Root of the RevGen CSVs and OpenImages |
-| `INGUARD_OUTPUT_ROOT` | `./outputs/revgen` | Root of generated benchmark data |
-| `INGUARD_CKPT_ROOT` | `./outputs/checkpoints` | Root of training checkpoints |
-| `INGUARD_DEVICE` | `cuda:0` | Default CUDA device |
-| `INGUARD_OSS_MOUNT` / `INGUARD_OSS_URL` | placeholders | Optional: mount-path → HTTP-URL mapping used only by the VLM image-labeling feature |
-
-Example:
-
-```bash
-export INGUARD_MODELS_ROOT=/data/models
-export INGUARD_DATA_ROOT=/data/datasets          # RevGen CSVs live in /data/datasets/RevGen
-export INGUARD_OUTPUT_ROOT=/data/outputs/revgen
-export INGUARD_CKPT_ROOT=/data/outputs/checkpoints
-```
-
-**T2I model resolution:** a model directory placed at
-`$INGUARD_MODELS_ROOT/<name>` (or symlinked there by the smoke test) is used
-as-is; if it is absent, the scripts fall back to the public HuggingFace
-repo id and diffusers downloads the model into the HF cache on first use —
-no manual download required:
-
-| Model | Local dir under `INGUARD_MODELS_ROOT` | HF repo id (fallback) |
-|---|---|---|
-| Z-Image-Turbo | `Z-Image-Turbo` | `Tongyi-MAI/Z-Image-Turbo` |
-| Qwen-Image-2512 | `Qwen-Image-2512` | `Qwen/Qwen-Image-2512` |
-| HunyuanImage-2.1 | `HunyuanImage-2.1-Diffusers` | `hunyuanvideo-community/HunyuanImage-2.1-Diffusers` |
-| FLUX.2-klein-base-9B | `FLUX.2-klein-base-9B` | `black-forest-labs/FLUX.2-klein-base-9B` |
-| InternVL-U | `InternVL-U` | `InternVL-U/InternVL-U` |
-
-Some repositories may require a one-time login or license acceptance
-(`hf auth login`); users behind a restricted network can set `HF_ENDPOINT`
-to a mirror. The InternVL-U pipeline components are provided by the bundled
-port under `sage/backends/internvlu/` — nothing extra to install.
-
-Most scripts expose their defaults as CLI flags (`--help` lists them). The
-two latent-detector training scripts are the exception — they are configured
-by editing the CONFIG dict at the bottom of the file (see
-[Step 6](#step-6--train-the-latent-detector-latent_detector)).
-
 ## Resources
 
 ### RevGen dataset
@@ -142,6 +89,11 @@ evaluate the guardrail: prompts spanning porn, gore, and IP risk dimensions in
 Chinese and English, each produced by reverse-generating a prompt from a real
 image with a VLM (image → VLM → prompt). It is released as four flat CSV
 files:
+
+![LLM-only versus VLM-driven prompt generation for RevGen](./assets/readme/revgen-overview.png)
+
+*RevGen grounds prompts in real-image scene diversity, then optionally applies
+controlled-IP rewriting and clustering-based sampling before T2I generation.*
 
 | File | Content | Consumed by |
 |---|---|---|
@@ -245,6 +197,54 @@ model repository and mind the `transformers==4.52.3` pin (see
 [Notes](#notes)); the SAGE-enhanced embedding is injected by hooking the
 pipeline's `prepare_forward_input` (its triple-CFG encoding is kept intact).
 
+## Configuration
+
+Training, benchmark, and evaluation scripts read their default paths from
+environment variables. Defaults are placeholders (`/path/to/...`) — export
+the ones you need before running anything:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INGUARD_MODELS_ROOT` | `/path/to/models` | Root of the five T2I generation models |
+| `INGUARD_DATA_ROOT` | `/path/to/data` | Root of the RevGen CSVs and OpenImages |
+| `INGUARD_OUTPUT_ROOT` | `./outputs/revgen` | Root of generated benchmark data |
+| `INGUARD_CKPT_ROOT` | `./outputs/checkpoints` | Root of training checkpoints |
+| `INGUARD_DEVICE` | `cuda:0` | Default CUDA device |
+| `INGUARD_OSS_MOUNT` / `INGUARD_OSS_URL` | placeholders | Optional: mount-path → HTTP-URL mapping used only by the VLM image-labeling feature |
+
+Example:
+
+```bash
+export INGUARD_MODELS_ROOT=/data/models
+export INGUARD_DATA_ROOT=/data/datasets          # RevGen CSVs live in /data/datasets/RevGen
+export INGUARD_OUTPUT_ROOT=/data/outputs/revgen
+export INGUARD_CKPT_ROOT=/data/outputs/checkpoints
+```
+
+**T2I model resolution:** a model directory placed at
+`$INGUARD_MODELS_ROOT/<name>` (or symlinked there by the smoke test) is used
+as-is; if it is absent, the scripts fall back to the public HuggingFace
+repo id and diffusers downloads the model into the HF cache on first use —
+no manual download required:
+
+| Model | Local dir under `INGUARD_MODELS_ROOT` | HF repo id (fallback) |
+|---|---|---|
+| Z-Image-Turbo | `Z-Image-Turbo` | `Tongyi-MAI/Z-Image-Turbo` |
+| Qwen-Image-2512 | `Qwen-Image-2512` | `Qwen/Qwen-Image-2512` |
+| HunyuanImage-2.1 | `HunyuanImage-2.1-Diffusers` | `hunyuanvideo-community/HunyuanImage-2.1-Diffusers` |
+| FLUX.2-klein-base-9B | `FLUX.2-klein-base-9B` | `black-forest-labs/FLUX.2-klein-base-9B` |
+| InternVL-U | `InternVL-U` | `InternVL-U/InternVL-U` |
+
+Some repositories may require a one-time login or license acceptance
+(`hf auth login`); users behind a restricted network can set `HF_ENDPOINT`
+to a mirror. The InternVL-U pipeline components are provided by the bundled
+port under `sage/backends/internvlu/` — nothing extra to install.
+
+Most scripts expose their defaults as CLI flags (`--help` lists them). The
+two latent-detector training scripts are the exception — they are configured
+by editing the CONFIG dict at the bottom of the file (see
+[Step 6](#step-6--train-the-latent-detector-latent_detector)).
+
 ## Routing logic
 
 Every prompt is classified into one of four tiers:
@@ -266,6 +266,23 @@ risk thresholds τ_p/τ_g, per-category SAGE strengths α_p/α_g/α_i, asymmetri
 soft-gating temperatures, and the deployment step. `detect_step` uses 0-based
 step indexing; e.g. `z-image-turbo` checks after the 4th of 9 denoising
 steps, skipping the remaining 5.
+
+## Key results
+
+Across the five supported models, InGuard reaches **97.9–98.8% end-to-end
+safety**, reduces benign disturbance by **57.5–73.5%**, and uses approximately
+**3.7× fewer guardrail parameters** than the conventional outer-guardrail
+baseline. Mid-generation interception also skips **50.0–55.6%** of denoising
+compute at the deployed detection step, depending on the model.
+
+![Latent-detector accuracy across inference-compute budgets](./assets/readme/latent-efficiency.png)
+
+*The deployed step (star) preserves most of the latent detector's final Avg F1
+while allowing roughly half of the denoising computation to be skipped after
+an unsafe detection.*
+
+For full experimental settings, baselines, and per-model results, see the
+[paper](https://arxiv.org/abs/2609.27620).
 
 ## Training from scratch
 
